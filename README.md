@@ -22,8 +22,7 @@ Audio (MP3) ──→ wav2vec2 phoneme model ──→ Frame-level phoneme poste
 4. **GOP Scoring**: For each phoneme, computes `GOP = log P(target) - log P(best_other)`. Negative GOP means the model thinks another phoneme fits better → likely mispronunciation
 5. **Error Detection**: Phonemes with GOP below threshold (-2.5) are flagged as errors
 
-
-1. System Architecture: A Multi-tiered Approach
+fig1. System Architecture: A Multi-tiered Approach
 The architecture follows a Bottom-to-Top (BT) layered design, ensuring that high-level business logic is decoupled from underlying AI capabilities and data storage.
 
 Layer 1: Foundation & Data Base (The Ground)
@@ -52,7 +51,8 @@ Review & Feedback: A module that provides granular explanations of errors.
 Resource Recommendation: An upper-level service that fetches relevant videos or exercises from the library based on the Agent’s generated plan.
 
 ![architecture_chart](./figures/architecture_chart.png "系统架构")
-2. Data Flow & Agent State Logic
+
+fig2. Data Flow & Agent State Logic
 The system operates on a Stateful Cyclic Workflow, moving beyond simple linear processing to a sophisticated loop of "Assess -> Plan -> Execute -> Remember."
 
 Phase 1: Input & Assessment (Day N)
