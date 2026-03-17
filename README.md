@@ -25,6 +25,8 @@ Audio (MP3) ──→ wav2vec2 phoneme model ──→ Frame-level phoneme poste
 fig1. System Architecture: A Multi-tiered Approach
 The architecture follows a Bottom-to-Top (BT) layered design, ensuring that high-level business logic is decoupled from underlying AI capabilities and data storage.
 
+![architecture_chart](./figures/architecture_chart.png "系统架构")
+
 Layer 1: Foundation & Data Base (The Ground)
 User/Memory Database: Stores persistent user profiles, historical performance data, and the current "State" of the learning journey.
 
@@ -50,10 +52,12 @@ Review & Feedback: A module that provides granular explanations of errors.
 
 Resource Recommendation: An upper-level service that fetches relevant videos or exercises from the library based on the Agent’s generated plan.
 
-![architecture_chart](./figures/architecture_chart.png "系统架构")
+
 
 fig2. Data Flow & Agent State Logic
 The system operates on a Stateful Cyclic Workflow, moving beyond simple linear processing to a sophisticated loop of "Assess -> Plan -> Execute -> Remember."
+
+![flow_chart](./figures/flow_chart.png "系统架构")
 
 Phase 1: Input & Assessment (Day N)
 User Submission: The user submits audio via the Application Layer.
@@ -70,7 +74,7 @@ Context Retrieval: Upon the user's return, the Agent retrieves the previous stat
 Output Generation: The Agent executes a hybrid strategy: "Execute Old Plan (Review) + Deploy New Plan (Advance)."
 Resource Delivery: The Application Layer presents specific recommended resources based on the refined plan.
 
-![flow_chart](./figures/flow_chart.png "系统架构")
+
 
 
 ## Setup
