@@ -22,6 +22,57 @@ Audio (MP3) ──→ wav2vec2 phoneme model ──→ Frame-level phoneme poste
 4. **GOP Scoring**: For each phoneme, computes `GOP = log P(target) - log P(best_other)`. Negative GOP means the model thinks another phoneme fits better → likely mispronunciation
 5. **Error Detection**: Phonemes with GOP below threshold (-2.5) are flagged as errors
 
+
+1. System Architecture: A Multi-tiered Approach
+The architecture follows a Bottom-to-Top (BT) layered design, ensuring that high-level business logic is decoupled from underlying AI capabilities and data storage.
+
+Layer 1: Foundation & Data Base (The Ground)
+User/Memory Database: Stores persistent user profiles, historical performance data, and the current "State" of the learning journey.
+
+Training/Experimental Database: A dedicated repository for raw audio and evaluation logs used for continuous model fine-tuning and iterative testing.
+
+Learning Resource Library: A static repository of educational assets (videos, courseware, and scripts) indexed for retrieval.
+
+Layer 2: Core Technical Base (The AI Engine)
+Pronunciation Inference Model: A fine-tuned LLM/Speech model that processes raw audio to detect phoneme-level errors.
+
+Evaluation Engine: Converts model output into structured Evaluation Logs, identifying specific weaknesses (e.g., specific words or intonation issues).
+
+Logic Planner: Acts as a bridge between raw data and pedagogy. It transforms "Logs" into actionable "Learning Plans" based on pre-defined teaching templates.
+
+Layer 3: Intelligent Orchestration (The Agent Hub)
+Agent State Machine: Inspired by the LangGraph framework, this is the system's "Brain." It manages the logic flow, deciding whether a user needs more practice on an old task or is ready for new content.
+Memory Module: Handles Context Injection. It retrieves past performance to inform current decisions, ensuring the Agent "remembers" that a user struggled with a specific word yesterday.
+
+Scheduler: Enforces pedagogical constraints, such as daily workload limits and curriculum boundaries.
+Layer 4: Application Layer (The Surface)
+Oral Dialogue Interface: The primary interaction point for real-time speech practice.
+Review & Feedback: A module that provides granular explanations of errors.
+
+Resource Recommendation: An upper-level service that fetches relevant videos or exercises from the library based on the Agent’s generated plan.
+
+![architecture_chart](./figures/architecture_chart.png "系统架构")
+2. Data Flow & Agent State Logic
+The system operates on a Stateful Cyclic Workflow, moving beyond simple linear processing to a sophisticated loop of "Assess -> Plan -> Execute -> Remember."
+
+Phase 1: Input & Assessment (Day N)
+User Submission: The user submits audio via the Application Layer.
+AI Evaluation: The Technical Base processes the audio, generating a detailed Evaluation Log.
+State Update: The Log is fed into the Agent State, updating the user's current mastery level.
+
+Phase 2: Logical Planning & Memory Persistence
+Dynamic Planning: The Planner analyzes the Log (e.g., "Apple" mispronounced) and maps it to specific knowledge points (A, B, or C).
+Plan Update: A new learning plan is generated. This plan is not just stored in a DB but is committed to the Agent's Memory, influencing the next "turn" of the conversation.
+Persistence: The State is saved via a Checkpointer, allowing the system to resume exactly where the user left off.
+
+Phase 3: Feedback & Contextual Execution (Day N+1)
+Context Retrieval: Upon the user's return, the Agent retrieves the previous state from Memory.
+Output Generation: The Agent executes a hybrid strategy: "Execute Old Plan (Review) + Deploy New Plan (Advance)."
+Resource Delivery: The Application Layer presents specific recommended resources based on the refined plan.
+
+![flow_chart](./figures/flow_chart.png "系统架构")
+
+
 ## Setup
 
 ```bash
