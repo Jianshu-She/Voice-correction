@@ -1,20 +1,31 @@
-# Voice Correction Pipeline v1.0
+# Voice Correction Pipeline
 
 Phoneme-level English pronunciation assessment system. Given a reference text and an audio recording, identifies which phonemes are pronounced correctly and which have errors.
 
-## How It Works
+## Pipeline v2.0 (WavLM Fine-tuned) — Recommended
+
+Uses a **fine-tuned WavLM-Large** backbone + MLP scoring head, trained on 11K children's speech samples.
+
+Model weights hosted on HuggingFace: [Jianshu001/wavlm-phoneme-scorer](https://huggingface.co/Jianshu001/wavlm-phoneme-scorer)
 
 ```
-Reference Text ──→ G2P (grapheme-to-phoneme) ──→ Expected phoneme sequence
+Reference Text ──→ G2P ──→ Expected phoneme sequence
+                                    │
+Audio ──→ CTC model ──→ Viterbi Forced Alignment ──→ Frame segments
+  │                                                       │
+  └──→ WavLM-Large (fine-tuned) ──→ Hidden states ──→ Pool per segment
                                                           │
-Audio (MP3) ──→ wav2vec2 phoneme model ──→ Frame-level phoneme posteriors
+                                                    + phone embedding
+                                                    + GOP score
                                                           │
-                                              Viterbi Forced Alignment
-                                                          │
-                                              GOP (Goodness of Pronunciation)
-                                                          │
-                                              Per-phoneme error detection
+                                                    MLP scorer head
+                                                    ├── phoneme score (0-100)
+                                                    └── error probability (0-1)
 ```
+
+## Pipeline v1.0 (GOP Baseline)
+
+Uses GOP (Goodness of Pronunciation) scoring with a frozen `wav2vec2-xlsr-53-espeak-cv-ft` model.
 
 1. **G2P**: Converts reference text to ARPAbet phoneme sequence using CMU dictionary
 2. **Acoustic Model**: `wav2vec2-xlsr-53-espeak-cv-ft` produces frame-level IPA phoneme probabilities
@@ -88,76 +99,79 @@ conda install -c conda-forge ffmpeg
 # or: apt install ffmpeg
 ```
 
-The wav2vec2 model (~1.2GB) downloads automatically on first run.
+Models download automatically on first run from HuggingFace.
 
-## Usage
+## Usage (v2.0 — Recommended)
+
+### Download Model
+
+The model checkpoint (~1.2GB) is automatically downloaded from HuggingFace on first use. You can also download it manually:
+
+```bash
+# Option 1: Auto-download (happens on first run)
+python pipeline_v2.py --audio audio.mp3 --text "Hello, Peter."
+
+# Option 2: Manual download via huggingface-cli
+huggingface-cli download Jianshu001/wavlm-phoneme-scorer wavlm_finetuned.pt --local-dir .
+
+# Option 3: Manual download via Python
+from huggingface_hub import hf_hub_download
+hf_hub_download(repo_id="Jianshu001/wavlm-phoneme-scorer", filename="wavlm_finetuned.pt", local_dir=".")
+```
 
 ### Single File
 
 ```bash
-python pipeline.py --audio path/to/audio.mp3 --text "Hello, Peter."
+python pipeline_v2.py --audio path/to/audio.mp3 --text "Hello, Peter."
 ```
 
 Output:
 ```
 ============================================================
 Text: "Hello, Peter."
-Overall Score: 82.3/100  (errors: 1/8)
+Overall Score: 85.2/100  (errors: 0/8)
 ============================================================
 
-  ✓ Hello            score= 87.0  errors=0/4
-      /hh  /  GOP= +4.90
-      /ah  /  GOP= +0.60
-      /l   /  GOP= +6.20
-      /ow  /  GOP= -0.40
+  ✓ Hello            score= 87.7  errors=0/4
+      /hh  /  score= 98.6  GOP= -0.97  pherr=0.05
+      /ah  /  score= 73.1  GOP= -7.40  pherr=0.43
+      /l   /  score= 88.6  GOP= +4.00  pherr=0.29
+      /ow  /  score= 90.7  GOP= -6.05  pherr=0.13
 
-  ✗ Peter            score= 77.5  errors=1/4
-      /p   /  GOP= +5.40
-      /iy  /  GOP= +3.70
-      /t   /  GOP= +0.50
-      /er  /  GOP= -3.10 ← ERROR
-```
-
-### JSON Output
-
-```bash
-python pipeline.py --audio audio.mp3 --text "Hello, Peter." --json
-```
-
-### Batch Mode
-
-Process all entries from `eval_log.xlsx`:
-
-```bash
-# Process first 20 samples, save results to JSON
-python pipeline.py --batch --input eval_log.xlsx --audio-dir audio_files/ --output results.json --limit 20
-
-# Process all samples and evaluate against ground truth
-python pipeline.py --batch --input eval_log.xlsx --audio-dir audio_files/ --evaluate
+  ✓ Peter            score= 82.6  errors=0/4
+      /p   /  score= 95.7  GOP= +5.40  pherr=0.08
+      /iy  /  score= 90.2  GOP= +3.70  pherr=0.12
+      /t   /  score= 72.5  GOP= +0.50  pherr=0.55
+      /er  /  score= 71.8  GOP= -1.40  pherr=0.61
 ```
 
 ### Python API
 
 ```python
-from pipeline import PronunciationAssessor
+from pipeline_v2 import PronunciationAssessorV2
 
-assessor = PronunciationAssessor()
+# Auto-download from HuggingFace
+assessor = PronunciationAssessorV2.from_pretrained()
+
+# Or with local checkpoint
+assessor = PronunciationAssessorV2(checkpoint_path="wavlm_finetuned.pt")
+
 result = assessor.assess("audio.mp3", "Hello, Peter.")
 
 # result structure:
 # {
 #   "text": "Hello, Peter.",
-#   "overall_score": 82.3,
+#   "overall_score": 85.2,
 #   "n_phonemes": 8,
-#   "n_errors": 1,
-#   "error_rate": 12.5,
+#   "n_errors": 0,
+#   "error_rate": 0.0,
 #   "words": [
 #     {
 #       "word": "Hello",
-#       "score": 87.0,
+#       "score": 87.7,
 #       "has_error": false,
 #       "phonemes": [
-#         {"phone": "hh", "gop": 4.9, "error": false},
+#         {"phone": "hh", "score": 98.6, "gop": -0.97, "pherr_prob": 0.05, "error": false},
 #         ...
 #       ]
 #     },
@@ -172,13 +186,24 @@ results = assessor.assess_batch([
 ])
 ```
 
-### Options
+### Batch Mode
+
+```bash
+# Process samples from xlsx, save results to JSON
+python pipeline_v2.py --batch --input eval_log.xlsx --audio-dir audio_files/ --output results.json --limit 20
+
+# Evaluate against ground truth
+python pipeline_v2.py --batch --input eval_log.xlsx --audio-dir audio_files/ --evaluate
+```
+
+### Options (v2.0)
 
 | Flag | Description |
 |------|-------------|
 | `--audio` | Path to audio file (single mode) |
 | `--text` | Reference text (single mode) |
-| `--threshold` | GOP threshold for error detection (default: -2.5) |
+| `--checkpoint` | Path to model checkpoint (default: auto-download from HuggingFace) |
+| `--threshold` | Pherr probability threshold for error detection (default: 0.70) |
 | `--batch` | Enable batch mode |
 | `--input` | Input xlsx file (batch mode) |
 | `--audio-dir` | Audio files directory (batch mode) |
@@ -188,6 +213,12 @@ results = assessor.assess_batch([
 | `--json` | Output JSON instead of pretty print |
 | `--device` | Device: `cuda:0`, `cpu` |
 
+### v1.0 Usage (GOP Baseline)
+
+```bash
+python pipeline.py --audio audio.mp3 --text "Hello, Peter."
+```
+
 ## Data
 
 - `audio_files/` — 1000 MP3 recordings of English learners (children)
@@ -196,43 +227,41 @@ results = assessor.assess_batch([
   - `content`: reference text
   - `json_content`: detailed scoring (overall accuracy, word-level scores, phoneme-level scores with error flags)
 
-## Current Performance (v1.0)
+## Performance
 
-Evaluated on 1000 samples against ground truth:
+| Metric | v1.0 (GOP) | v2.0 (WavLM) |
+|--------|-----------|--------------|
+| Phoneme error AUC-ROC | 0.738 | **0.870** |
+| Phoneme error F1 | 0.476 | **0.595** |
+| Phoneme error Precision | 0.379 | **0.592** |
+| Phoneme error Recall | 0.638 | 0.598 |
+| Phone score Pearson | 0.372 | **0.645** |
+| Phone score MAE | 27.44 | **16.47** |
 
-| Metric | Value |
-|--------|-------|
-| Phoneme error detection AUC-ROC | 0.738 |
-| Best F1 (threshold=-2.5) | 0.476 |
-| Precision @ best F1 | 0.379 |
-| Recall @ best F1 | 0.638 |
-| GOP vs GT phone score Pearson | 0.372 |
+v2.0 evaluated on test set: 8062 phonemes from 1727 audio files (children's speech).
 
 ### Known Limitations
 
-- The acoustic model is trained on adult speech; performance on children's speech is degraded
 - G2P-generated phoneme sequences may not perfectly match the ground truth phoneme sequences
-- Simple threshold-based error detection; no per-phoneme calibration
 - Does not handle numbers ("8 o'clock") or non-English names well
+- v2.0 requires GPU (~22GB VRAM) for inference; v1.0 can run on CPU
 
 ## Project Structure
 
 ```
 Voice-correction/
-├── pipeline.py              # Main pipeline (v1.0) — use this
-├── eval_log.xlsx            # Ground truth data
-├── audio_files/             # 1000 MP3 recordings
-├── phoneme_gop_eval.py      # Evaluation script (full analysis)
-├── gop_pipeline.py          # Earlier prototype (v1, character-level)
-├── gop_pipeline_v2.py       # Earlier prototype (v2, feature engineering)
-├── gop_pipeline_v3.py       # Earlier prototype (v3, with Whisper ASR)
-├── phoneme_gop.py           # Earlier prototype (phoneme-level)
+├── pipeline_v2.py           # Main pipeline v2.0 (WavLM fine-tuned) — recommended
+├── pipeline.py              # Pipeline v1.0 (GOP baseline)
+├── finetune_wavlm.py        # WavLM backbone fine-tuning script
+├── finetune_backbone.py     # wav2vec2 backbone fine-tuning script
+├── wavlm_finetuned.pt       # WavLM model checkpoint (or auto-downloaded from HF)
+├── eval_log.xlsx            # Ground truth data (1000 sentences)
+├── word_eval_log.xlsx       # Ground truth data (10601 words)
+├── audio_files/             # 1000 sentence-level MP3 recordings
+├── words_audio_files/       # 10655 word-level MP3 recordings
 └── README.md
 ```
 
-## Next Steps
+## Model on HuggingFace
 
-- Fine-tune wav2vec2/HuBERT on children's speech data
-- Use ground truth phoneme sequences for alignment instead of G2P
-- Train a classifier/regressor on wav2vec2 hidden states for per-phoneme scoring
-- Per-phoneme threshold calibration
+The fine-tuned WavLM model is hosted at: [Jianshu001/wavlm-phoneme-scorer](https://huggingface.co/Jianshu001/wavlm-phoneme-scorer)

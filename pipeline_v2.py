@@ -106,13 +106,17 @@ class PhoneScorerHead(nn.Module):
 # ============================================================
 # Main Pipeline
 # ============================================================
+HF_REPO_ID = "Jianshu001/wavlm-phoneme-scorer"
+HF_CHECKPOINT_FILENAME = "wavlm_finetuned.pt"
+
+
 class PronunciationAssessorV2:
     """Phoneme-level pronunciation assessment using fine-tuned WavLM backbone."""
 
     def __init__(self, checkpoint_path=None, device=None, pherr_threshold=DEFAULT_PHERR_THRESHOLD):
         self.device = device or torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.pherr_threshold = pherr_threshold
-        self._checkpoint_path = checkpoint_path or self._default_checkpoint()
+        self._checkpoint_path = checkpoint_path or self._resolve_checkpoint()
         self._backbone = None
         self._scorer = None
         self._fe_backbone = None
@@ -123,8 +127,32 @@ class PronunciationAssessorV2:
         self._g2p = None
 
     @staticmethod
-    def _default_checkpoint():
-        return str(Path(__file__).parent / "wavlm_finetuned.pt")
+    def _resolve_checkpoint():
+        """Try local file first, then download from HuggingFace."""
+        local_path = Path(__file__).parent / HF_CHECKPOINT_FILENAME
+        if local_path.exists():
+            return str(local_path)
+        print(f"Downloading model from huggingface.co/{HF_REPO_ID}...", file=sys.stderr)
+        return hf_hub_download(repo_id=HF_REPO_ID, filename=HF_CHECKPOINT_FILENAME)
+
+    @classmethod
+    def from_pretrained(cls, repo_id=None, device=None, pherr_threshold=DEFAULT_PHERR_THRESHOLD):
+        """
+        Load model from HuggingFace Hub.
+
+        Args:
+            repo_id: HuggingFace repo (default: Jianshu001/wavlm-phoneme-scorer)
+            device: torch device
+            pherr_threshold: error detection threshold
+
+        Example:
+            assessor = PronunciationAssessorV2.from_pretrained()
+            result = assessor.assess("audio.mp3", "Hello, Peter.")
+        """
+        repo = repo_id or HF_REPO_ID
+        print(f"Downloading model from huggingface.co/{repo}...", file=sys.stderr)
+        checkpoint_path = hf_hub_download(repo_id=repo, filename=HF_CHECKPOINT_FILENAME)
+        return cls(checkpoint_path=checkpoint_path, device=device, pherr_threshold=pherr_threshold)
 
     def _load_models(self):
         if self._backbone is not None:
