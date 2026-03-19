@@ -1,267 +1,374 @@
-# Voice Correction Pipeline
+# Voice Correction System
 
-Phoneme-level English pronunciation assessment system. Given a reference text and an audio recording, identifies which phonemes are pronounced correctly and which have errors.
+Phoneme-level English pronunciation assessment and correction system for children learning English. Combines a fine-tuned WavLM speech model with GPT-4o to provide intelligent, personalized pronunciation feedback.
 
-## Pipeline v2.0 (WavLM Fine-tuned) — Recommended
-
-Uses a **fine-tuned WavLM-Large** backbone + MLP scoring head, trained on 11K children's speech samples.
-
-Model weights hosted on HuggingFace: [Jianshu001/wavlm-phoneme-scorer](https://huggingface.co/Jianshu001/wavlm-phoneme-scorer)
+## System Architecture
 
 ```
-Reference Text ──→ G2P ──→ Expected phoneme sequence
+┌─────────────────────────────────────────────────────────────────┐
+│                    pronunciation_agent.py                        │
+│                      (Agent Orchestration)                       │
+│                                                                  │
+│  Input: audio.mp3 + "Hello, Peter." + user_id                   │
+│       │                                                          │
+│       ▼                                                          │
+│  ┌──────────┐    ┌──────────────┐    ┌───────────────┐          │
+│  │ Step 1   │    │   Step 2     │    │   Step 3      │          │
+│  │ WavLM    │───→│ User Memory  │───→│  GPT-4o       │          │
+│  │ Assess   │    │ Load History │    │  Feedback +    │          │
+│  │ Phonemes │    │              │    │  Learning Plan │          │
+│  └──────────┘    └──────────────┘    └───────────────┘          │
+│       │                                      │                   │
+│       ▼                                      ▼                   │
+│  pipeline_v2.py                    OpenAI API (gpt-4o)          │
+│  (WavLM fine-tuned)               Chinese feedback + plan        │
+│       │                                      │                   │
+│       ▼                                      ▼                   │
+│  ┌──────────┐                      ┌───────────────┐            │
+│  │ Step 5   │                      │   Step 4      │            │
+│  │ Return   │◀─────────────────────│ Update Memory │            │
+│  └──────────┘                      └───────────────┘            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+![architecture_chart](./figures/architecture_chart.png "System Architecture")
+
+![flow_chart](./figures/flow_chart.png "Data Flow")
+
+---
+
+## Layer 1: Pronunciation Assessment Model (pipeline_v2.py)
+
+The core engine that converts audio + reference text into phoneme-level assessment results.
+
+### Processing Pipeline
+
+```
+"Hello, Peter."  ──→  G2P (g2p_en)  ──→  /hh ah l ow p iy t er/
+                                                    │
+audio.mp3  ──→  wav2vec2-xlsr-53 (CTC, frozen)      │
+                    │                                │
+                    ▼                                ▼
+              Frame-level phoneme          Expected phoneme sequence
+              probabilities                (ARPAbet → IPA mapping)
+              (T frames × 392 IPA)
+                    │                                │
+                    └────────── Viterbi Alignment ───┘
                                     │
-Audio ──→ CTC model ──→ Viterbi Forced Alignment ──→ Frame segments
-  │                                                       │
-  └──→ WavLM-Large (fine-tuned) ──→ Hidden states ──→ Pool per segment
-                                                          │
-                                                    + phone embedding
-                                                    + GOP score
-                                                          │
-                                                    MLP scorer head
-                                                    ├── phoneme score (0-100)
-                                                    └── error probability (0-1)
+                                    ▼
+                    Per-phoneme audio frame segments
+                    /hh/ → frames 0-15, /ah/ → frames 16-30, ...
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+              WavLM-Large      GOP Score        Frame count
+              (fine-tuned)     log P(target)    n_frames
+              1024-dim         - log P(best
+              hidden states     other)
+                    │               │               │
+                    ▼               ▼               ▼
+              ┌─────────────────────────────────────┐
+              │  Concat: hidden(1024) + phone_emb(32)│
+              │          + GOP(1) + n_frames(1)      │
+              │                = 1058-dim             │
+              └─────────────────┬───────────────────┘
+                                │
+                                ▼
+                    MLP (1058 → 512 → 512 → 256)
+                    BatchNorm + GELU + Dropout
+                                │
+                    ┌───────────┴───────────┐
+                    ▼                       ▼
+              score_head               pherr_head
+              (256 → 64 → 1)          (256 → 64 → 1)
+                    │                       │
+                    ▼                       ▼
+              Phoneme score 0-100    Error probability 0-1
+              (regression)           (classification, sigmoid)
 ```
 
-## Pipeline v1.0 (GOP Baseline)
+### Models Used
 
-Uses GOP (Goodness of Pronunciation) scoring with a frozen `wav2vec2-xlsr-53-espeak-cv-ft` model.
+| Model | Role | Status |
+|-------|------|--------|
+| `wav2vec2-xlsr-53-espeak-cv-ft` | 392 IPA phoneme CTC model. Provides frame-level phoneme probabilities for Viterbi alignment and GOP computation | Frozen |
+| `WavLM-Large` (microsoft/wavlm-large) | Speech feature extraction backbone, outputs 1024-dim hidden states | **Fine-tuned (top 6 layers)** |
+| MLP scoring head | Predicts phoneme scores and error probabilities from concatenated features | Fully trained |
 
-1. **G2P**: Converts reference text to ARPAbet phoneme sequence using CMU dictionary
-2. **Acoustic Model**: `wav2vec2-xlsr-53-espeak-cv-ft` produces frame-level IPA phoneme probabilities
-3. **Forced Alignment**: Viterbi algorithm aligns each expected phoneme to audio frames
-4. **GOP Scoring**: For each phoneme, computes `GOP = log P(target) - log P(best_other)`. Negative GOP means the model thinks another phoneme fits better → likely mispronunciation
-5. **Error Detection**: Phonemes with GOP below threshold (-2.5) are flagged as errors
+### Viterbi Forced Alignment
 
-fig1. System Architecture: A Multi-tiered Approach
-The architecture follows a Bottom-to-Top (BT) layered design, ensuring that high-level business logic is decoupled from underlying AI capabilities and data storage.
+Aligns expected phoneme sequence to audio frames using dynamic programming on CTC emissions:
 
-![architecture_chart](./figures/architecture_chart.png "系统架构")
+```
+Input:  CTC emissions (T frames × 392 phonemes) + expected sequence [hh, ah, l, ow]
+                ↓
+Expand: [blank, hh, blank, ah, blank, l, blank, ow, blank]
+                ↓
+DP:     dp[t][s] = best path probability at frame t, state s
+        Transitions: stay / advance 1 / skip blank advance 2
+                ↓
+Trace:  Backtrack to get per-frame phoneme assignments
+                ↓
+Output: /hh/ → frames[0..15], /ah/ → frames[16..30], ...
+```
 
-Layer 1: Foundation & Data Base (The Ground)
-User/Memory Database: Stores persistent user profiles, historical performance data, and the current "State" of the learning journey.
+### GOP (Goodness of Pronunciation)
 
-Training/Experimental Database: A dedicated repository for raw audio and evaluation logs used for continuous model fine-tuning and iterative testing.
+For each aligned phoneme segment:
 
-Learning Resource Library: A static repository of educational assets (videos, courseware, and scripts) indexed for retrieval.
+```
+GOP = mean(log P(target | frame)) - mean(max log P(other | frame))
 
-Layer 2: Core Technical Base (The AI Engine)
-Pronunciation Inference Model: A fine-tuned LLM/Speech model that processes raw audio to detect phoneme-level errors.
+GOP > 0  →  Model confirms this is the expected phoneme (correct)
+GOP < 0  →  Model thinks another phoneme fits better (likely error)
+```
 
-Evaluation Engine: Converts model output into structured Evaluation Logs, identifying specific weaknesses (e.g., specific words or intonation issues).
+GOP is used as one of the input features to the MLP, but the final error decision is made by the learned pherr_head (not a simple GOP threshold).
 
-Logic Planner: Acts as a bridge between raw data and pedagogy. It transforms "Logs" into actionable "Learning Plans" based on pre-defined teaching templates.
+---
 
-Layer 3: Intelligent Orchestration (The Agent Hub)
-Agent State Machine: Inspired by the LangGraph framework, this is the system's "Brain." It manages the logic flow, deciding whether a user needs more practice on an old task or is ready for new content.
-Memory Module: Handles Context Injection. It retrieves past performance to inform current decisions, ensuring the Agent "remembers" that a user struggled with a specific word yesterday.
+## Layer 2: User Memory (UserMemory)
 
-Scheduler: Enforces pedagogical constraints, such as daily workload limits and curriculum boundaries.
-Layer 4: Application Layer (The Surface)
-Oral Dialogue Interface: The primary interaction point for real-time speech practice.
-Review & Feedback: A module that provides granular explanations of errors.
+JSON-file based persistent storage that tracks each user's learning progress across sessions.
 
-Resource Recommendation: An upper-level service that fetches relevant videos or exercises from the library based on the Agent’s generated plan.
+```
+user_memory/
+└── student_001.json
+    {
+      "user_id": "student_001",
+      "sessions": [                        // Session history
+        {
+          "timestamp": "2026-03-19T...",
+          "text": "Hello, Lingling.",
+          "overall_score": 80.1,
+          "error_phonemes": [
+            {"phone": "ah", "word": "Lingling", "score": 60.5},
+            {"phone": "ng", "word": "Lingling", "score": 32.3}
+          ]
+        }
+      ],
+      "weak_phonemes": {                   // Cumulative per-phoneme stats
+        "ah": {"count": 5, "errors": 3, "total_score": 320},
+        "ng": {"count": 3, "errors": 2, "total_score": 150}
+      },
+      "overall_stats": {                   // Aggregate statistics
+        "total_sessions": 10,
+        "total_phonemes": 120,
+        "total_errors": 15,
+        "avg_score": 78.5
+      },
+      "current_plan": {                    // Active learning plan
+        "focus_phonemes": ["ah", "ng"],
+        "practice_words": ["sing", "long", "song"]
+      }
+    }
+```
 
+**Purpose:**
+- Provides LLM with user history for **personalized** feedback
+- Tracks improvement across sessions (e.g., "/ng/ error rate dropped from 50% to 30%")
+- Persists learning plans for continuity between sessions
 
+---
 
-fig2. Data Flow & Agent State Logic
-The system operates on a Stateful Cyclic Workflow, moving beyond simple linear processing to a sophisticated loop of "Assess -> Plan -> Execute -> Remember."
+## Layer 3: LLM Agent (GPT-4o)
 
-![flow_chart](./figures/flow_chart.png "系统架构")
+The agent calls GPT-4o twice per session:
 
-Phase 1: Input & Assessment (Day N)
-User Submission: The user submits audio via the Application Layer.
-AI Evaluation: The Technical Base processes the audio, generating a detailed Evaluation Log.
-State Update: The Log is fed into the Agent State, updating the user's current mastery level.
+### Call 1: Generate Feedback
 
-Phase 2: Logical Planning & Memory Persistence
-Dynamic Planning: The Planner analyzes the Log (e.g., "Apple" mispronounced) and maps it to specific knowledge points (A, B, or C).
-Plan Update: A new learning plan is generated. This plan is not just stored in a DB but is committed to the Agent's Memory, influencing the next "turn" of the conversation.
-Persistence: The State is saved via a Checkpointer, allowing the system to resume exactly where the user left off.
+```
+System: You are an English pronunciation coach for Chinese children...
 
-Phase 3: Feedback & Contextual Execution (Day N+1)
-Context Retrieval: Upon the user's return, the Agent retrieves the previous state from Memory.
-Output Generation: The Agent executes a hybrid strategy: "Execute Old Plan (Review) + Deploy New Plan (Advance)."
-Resource Delivery: The Application Layer presents specific recommended resources based on the refined plan.
+User:
+  Evaluation: "Hello, Lingling." score=80.1
+  Errors: /ah/ (score=60.5), /ng/ (score=32.3)
+  User history: 3 sessions, weak phonemes: /ah/ (50% error), /ng/ (67% error)
 
+  Please provide: 1. Feedback  2. Learning plan  3. Encouragement
 
+GPT-4o → "你的Hello发得很好！Lingling里的/ah/需要张大嘴巴..."
+```
 
+### Call 2: Generate Structured Plan
+
+```
+User: Based on feedback, generate JSON learning plan
+
+GPT-4o → {
+  "focus_phonemes": ["ah", "ng"],
+  "practice_words": ["sing", "long", "song"],
+  "tips": ["张大嘴巴练习/ah/...", "舌头抵上牙龈练习/ng/..."]
+}
+```
+
+---
+
+## Layer 4: External Interfaces
+
+### 1. Python API (for OpenClaw skill integration)
+
+```python
+from pronunciation_agent import PronunciationAgent
+
+agent = PronunciationAgent()
+result = agent.run(audio="audio.mp3", text="Hello, Peter.", user_id="student_001")
+
+# result:
+# {
+#   "evaluation": { ... },          # Phoneme-level assessment
+#   "feedback": "你的发音很好...",    # LLM-generated Chinese feedback
+#   "plan": {                        # Structured learning plan
+#     "focus_phonemes": ["ah", "ng"],
+#     "practice_words": ["sing", "long"],
+#     "tips": ["张大嘴巴练习/ah/..."]
+#   },
+#   "user_stats": { ... },           # Updated user statistics
+#   "weak_phonemes": [ ... ]         # Historical weak phonemes
+# }
+```
+
+### 2. CLI
+
+```bash
+# With agent (assessment + LLM feedback + memory)
+python pronunciation_agent.py --audio audio.mp3 --text "Hello, Peter." --user student_001
+
+# Assessment only (no LLM, no memory)
+python pipeline_v2.py --audio audio.mp3 --text "Hello, Peter."
+```
+
+### 3. FastAPI REST API
+
+```bash
+# Start server
+pip install fastapi uvicorn python-multipart
+python pronunciation_agent.py --serve --port 8000
+
+# Endpoints:
+# POST /assess     (audio file + text + user_id) → full assessment + feedback
+# GET  /user/{id}  → user learning history and stats
+# GET  /health     → health check
+```
+
+### 4. Assessment-only API (pipeline_v2.py)
+
+```python
+from pipeline_v2 import PronunciationAssessorV2
+
+# Auto-download model from HuggingFace
+assessor = PronunciationAssessorV2.from_pretrained()
+result = assessor.assess("audio.mp3", "Hello, Peter.")
+```
+
+---
 
 ## Setup
 
 ```bash
 # Python 3.10+
-pip install torch torchaudio transformers g2p-en huggingface_hub openpyxl
+pip install torch torchaudio transformers g2p-en huggingface_hub openpyxl openai
 
-# ffmpeg is required for MP3 decoding
+# ffmpeg for MP3 decoding
 conda install -c conda-forge ffmpeg
 # or: apt install ffmpeg
+
+# Set OpenAI API key (for agent mode)
+export OPENAI_API_KEY="your-key-here"
 ```
-
-Models download automatically on first run from HuggingFace.
-
-## Usage (v2.0 — Recommended)
 
 ### Download Model
 
-The model checkpoint (~1.2GB) is automatically downloaded from HuggingFace on first use. You can also download it manually:
+The WavLM checkpoint (~1.2GB) downloads automatically on first use. Manual download:
 
 ```bash
-# Option 1: Auto-download (happens on first run)
-python pipeline_v2.py --audio audio.mp3 --text "Hello, Peter."
-
-# Option 2: Manual download via huggingface-cli
 huggingface-cli download Jianshu001/wavlm-phoneme-scorer wavlm_finetuned.pt --local-dir .
-
-# Option 3: Manual download via Python
-from huggingface_hub import hf_hub_download
-hf_hub_download(repo_id="Jianshu001/wavlm-phoneme-scorer", filename="wavlm_finetuned.pt", local_dir=".")
 ```
 
-### Single File
+---
 
-```bash
-python pipeline_v2.py --audio path/to/audio.mp3 --text "Hello, Peter."
+## Training
+
+### Data
+
+| Dataset | Samples | Phonemes | Source |
+|---------|---------|----------|--------|
+| eval_log.xlsx | 1,000 sentences | 12,438 | Children's English reading |
+| word_eval_log.xlsx | 10,601 words | 41,488 | Children's English words |
+| **Total** | **11,601** | **53,926** | Professional annotation (pherr + score) |
+
+### Training Configuration
+
+```
+Backbone: WavLM-Large (316M params)
+  - Freeze bottom 18 layers, fine-tune top 6 layers (76.6M trainable)
+  - Learning rate: 1e-5
+
+MLP Head: 1058 → 512 → 512 → 256 → (score, pherr)
+  - Learning rate: 5e-4
+
+Optimizer: AdamW, weight_decay=1e-3
+Scheduler: CosineAnnealing
+Gradient accumulation: 4 steps, gradient clipping: max_norm=1.0
+Early stopping: patience=8, stopped at epoch 24
+
+Loss: MSE/100 (score) + BCE with pos_weight=5.2 (pherr)
+      pos_weight compensates for class imbalance (only 16% errors)
+
+Train/Val/Test split: 40K / 5K / 8K phonemes (split by audio file)
 ```
 
-Output:
-```
-============================================================
-Text: "Hello, Peter."
-Overall Score: 85.2/100  (errors: 0/8)
-============================================================
+### Performance Comparison
 
-  ✓ Hello            score= 87.7  errors=0/4
-      /hh  /  score= 98.6  GOP= -0.97  pherr=0.05
-      /ah  /  score= 73.1  GOP= -7.40  pherr=0.43
-      /l   /  score= 88.6  GOP= +4.00  pherr=0.29
-      /ow  /  score= 90.7  GOP= -6.05  pherr=0.13
+| Method | Data | AUC | F1 | Precision | Recall | Pearson | MAE |
+|--------|------|-----|-----|-----------|--------|---------|-----|
+| GOP threshold (v1.0) | 1K | 0.738 | 0.476 | 0.379 | 0.638 | 0.372 | 27.44 |
+| E2E MLP frozen backbone (v2) | 1K | 0.814 | 0.565 | 0.500 | 0.650 | 0.528 | 22.57 |
+| Phoneme comparison | 1K | 0.691 | 0.492 | 0.379 | 0.703 | N/A | N/A |
+| wav2vec2-large fine-tune | 11K | 0.844 | 0.548 | 0.527 | 0.571 | 0.574 | 17.72 |
+| **WavLM-Large fine-tune** | **11K** | **0.870** | **0.595** | **0.592** | **0.598** | **0.645** | **16.47** |
 
-  ✓ Peter            score= 82.6  errors=0/4
-      /p   /  score= 95.7  GOP= +5.40  pherr=0.08
-      /iy  /  score= 90.2  GOP= +3.70  pherr=0.12
-      /t   /  score= 72.5  GOP= +0.50  pherr=0.55
-      /er  /  score= 71.8  GOP= -1.40  pherr=0.61
-```
+### Approaches Explored
 
-### Python API
+**1. GOP Threshold (v1.0)** — Compute `log P(target) - log P(best_other)` per phoneme, threshold at -2.5. Simple, no training needed, but limited by single threshold for all phonemes.
 
-```python
-from pipeline_v2 import PronunciationAssessorV2
+**2. E2E MLP with Frozen Backbone** — Extract wav2vec2 hidden states (frozen), train MLP head on 1K samples. Better than GOP but limited by small data and frozen features.
 
-# Auto-download from HuggingFace
-assessor = PronunciationAssessorV2.from_pretrained()
+**3. Phoneme Comparison** — Recognize what was actually said (top CTC prediction per segment), compare against expected phonemes. High recall (0.81) but low precision (0.34) because the CTC model frequently misrecognizes children's speech.
 
-# Or with local checkpoint
-assessor = PronunciationAssessorV2(checkpoint_path="wavlm_finetuned.pt")
+**4. Backbone Fine-tuning (wav2vec2 vs WavLM)** — Unfreeze top layers, train end-to-end on 11K samples. WavLM's denoising pre-training makes it more robust for non-standard (children's) speech.
 
-result = assessor.assess("audio.mp3", "Hello, Peter.")
-
-# result structure:
-# {
-#   "text": "Hello, Peter.",
-#   "overall_score": 85.2,
-#   "n_phonemes": 8,
-#   "n_errors": 0,
-#   "error_rate": 0.0,
-#   "words": [
-#     {
-#       "word": "Hello",
-#       "score": 87.7,
-#       "has_error": false,
-#       "phonemes": [
-#         {"phone": "hh", "score": 98.6, "gop": -0.97, "pherr_prob": 0.05, "error": false},
-#         ...
-#       ]
-#     },
-#     ...
-#   ]
-# }
-
-# Batch processing
-results = assessor.assess_batch([
-    ("audio1.mp3", "Hello."),
-    ("audio2.mp3", "Good morning."),
-])
-```
-
-### Batch Mode
-
-```bash
-# Process samples from xlsx, save results to JSON
-python pipeline_v2.py --batch --input eval_log.xlsx --audio-dir audio_files/ --output results.json --limit 20
-
-# Evaluate against ground truth
-python pipeline_v2.py --batch --input eval_log.xlsx --audio-dir audio_files/ --evaluate
-```
-
-### Options (v2.0)
-
-| Flag | Description |
-|------|-------------|
-| `--audio` | Path to audio file (single mode) |
-| `--text` | Reference text (single mode) |
-| `--checkpoint` | Path to model checkpoint (default: auto-download from HuggingFace) |
-| `--threshold` | Pherr probability threshold for error detection (default: 0.70) |
-| `--batch` | Enable batch mode |
-| `--input` | Input xlsx file (batch mode) |
-| `--audio-dir` | Audio files directory (batch mode) |
-| `--output` | Output JSON file |
-| `--limit` | Max samples to process (0=all) |
-| `--evaluate` | Compare with ground truth scores |
-| `--json` | Output JSON instead of pretty print |
-| `--device` | Device: `cuda:0`, `cpu` |
-
-### v1.0 Usage (GOP Baseline)
-
-```bash
-python pipeline.py --audio audio.mp3 --text "Hello, Peter."
-```
-
-## Data
-
-- `audio_files/` — 1000 MP3 recordings of English learners (children)
-- `eval_log.xlsx` — Ground truth from professional pronunciation assessment engine, with columns:
-  - `file_name`: audio filename
-  - `content`: reference text
-  - `json_content`: detailed scoring (overall accuracy, word-level scores, phoneme-level scores with error flags)
-
-## Performance
-
-| Metric | v1.0 (GOP) | v2.0 (WavLM) |
-|--------|-----------|--------------|
-| Phoneme error AUC-ROC | 0.738 | **0.870** |
-| Phoneme error F1 | 0.476 | **0.595** |
-| Phoneme error Precision | 0.379 | **0.592** |
-| Phoneme error Recall | 0.638 | 0.598 |
-| Phone score Pearson | 0.372 | **0.645** |
-| Phone score MAE | 27.44 | **16.47** |
-
-v2.0 evaluated on test set: 8062 phonemes from 1727 audio files (children's speech).
-
-### Known Limitations
-
-- G2P-generated phoneme sequences may not perfectly match the ground truth phoneme sequences
-- Does not handle numbers ("8 o'clock") or non-English names well
-- v2.0 requires GPU (~22GB VRAM) for inference; v1.0 can run on CPU
+---
 
 ## Project Structure
 
 ```
 Voice-correction/
-├── pipeline_v2.py           # Main pipeline v2.0 (WavLM fine-tuned) — recommended
-├── pipeline.py              # Pipeline v1.0 (GOP baseline)
-├── finetune_wavlm.py        # WavLM backbone fine-tuning script
-├── finetune_backbone.py     # wav2vec2 backbone fine-tuning script
-├── wavlm_finetuned.pt       # WavLM model checkpoint (or auto-downloaded from HF)
-├── eval_log.xlsx            # Ground truth data (1000 sentences)
-├── word_eval_log.xlsx       # Ground truth data (10601 words)
-├── audio_files/             # 1000 sentence-level MP3 recordings
-├── words_audio_files/       # 10655 word-level MP3 recordings
+├── pronunciation_agent.py   # Agent: assessment + LLM feedback + user memory
+├── pipeline_v2.py           # Core model: WavLM fine-tuned assessment (v2.0)
+├── pipeline.py              # Baseline: GOP threshold assessment (v1.0)
+├── finetune_wavlm.py        # Training script: WavLM backbone fine-tuning
+├── finetune_backbone.py     # Training script: wav2vec2 backbone fine-tuning
+├── phoneme_compare.py       # Experiment: phoneme comparison approach
+├── e2e_v2_train.py          # Training script: E2E MLP with frozen backbone
+├── e2e_phoneme_scorer.py    # Training script: E2E MLP v1
+├── wavlm_finetuned.pt       # Model checkpoint (auto-downloaded from HF)
+├── eval_log.xlsx            # Ground truth: 1000 sentences
+├── word_eval_log.xlsx       # Ground truth: 10601 words
+├── audio_files/             # Sentence recordings (1000 MP3)
+├── words_audio_files/       # Word recordings (10655 MP3)
+├── figures/                 # Architecture diagrams
+├── user_memory/             # User progress data (gitignored)
 └── README.md
 ```
 
 ## Model on HuggingFace
 
-The fine-tuned WavLM model is hosted at: [Jianshu001/wavlm-phoneme-scorer](https://huggingface.co/Jianshu001/wavlm-phoneme-scorer)
+[Jianshu001/wavlm-phoneme-scorer](https://huggingface.co/Jianshu001/wavlm-phoneme-scorer)
+
+## Known Limitations
+
+- G2P-generated phoneme sequences may not perfectly match ground truth sequences
+- Does not handle numbers ("8 o'clock") or non-English names well
+- v2.0 requires GPU (~22GB VRAM) for inference; v1.0 can run on CPU
+- LLM feedback quality depends on the GPT-4o model and prompt engineering
