@@ -359,8 +359,88 @@ Voice-correction/
 ├── words_audio_files/       # Word recordings (10655 MP3)
 ├── figures/                 # Architecture diagrams
 ├── user_memory/             # User progress data (gitignored)
+├── openclaw-skill/          # OpenClaw skill definition
+│   └── SKILL.md             # Skill metadata + agent instructions
 └── README.md
 ```
+
+---
+
+## OpenClaw Skill Integration
+
+This system can be used as an [OpenClaw](https://docs.openclaw.ai) skill, allowing any OpenClaw agent to call the pronunciation correction pipeline directly.
+
+### Skill Structure
+
+```
+openclaw-skill/
+└── SKILL.md
+```
+
+`SKILL.md` contains two parts:
+
+1. **YAML frontmatter** — Metadata telling OpenClaw what this skill needs:
+   ```yaml
+   ---
+   name: pronunciation-correction
+   description: Assess English pronunciation and provide AI feedback
+   metadata: {"openclaw": {
+     "emoji": "🗣️",
+     "requires": {
+       "bins": ["python3", "ffmpeg"],
+       "env": ["OPENAI_API_KEY"]
+     }
+   }}
+   user-invocable: true
+   ---
+   ```
+
+2. **Markdown instructions** — Tells the OpenClaw agent:
+   - **When to activate**: User says "check my pronunciation", "evaluate my reading", etc.
+   - **How to execute**: Run `pronunciation_agent.py` with audio + text + user_id
+   - **How to present results**: Show scores, errors, AI feedback, and learning plan
+
+### Install to OpenClaw
+
+```bash
+# Option 1: Manual install
+cp -r openclaw-skill ~/.openclaw/workspace/skills/pronunciation-correction
+
+# Option 2: Publish to ClawHub then install
+clawhub publish openclaw-skill/ \
+  --slug pronunciation-correction \
+  --name "Pronunciation Correction" \
+  --version 1.0.0 \
+  --tags "education,speech,pronunciation"
+
+clawhub install pronunciation-correction
+```
+
+### How it works in OpenClaw
+
+Once installed, users interact naturally:
+
+```
+User: "帮我检查一下这段录音的发音，内容是 Hello, Peter."
+       [attaches audio.mp3]
+
+OpenClaw Agent:
+  1. Triggers pronunciation-correction skill
+  2. Runs: python3 pronunciation_agent.py --audio audio.mp3 --text "Hello, Peter." --user default --json
+  3. Parses JSON result
+  4. Presents friendly feedback to user:
+
+     "你的总分是 85.2/100！Hello 发得很好（87.7分），
+      Peter 里的 /er/ 发音需要注意（pherr=0.61）...
+      建议练习：..."
+```
+
+The skill supports three modes:
+- **Full mode** (`pronunciation_agent.py`): Assessment + GPT-4o feedback + user memory
+- **Assessment only** (`pipeline_v2.py`): Phoneme scoring without LLM, faster
+- **API server mode** (`--serve`): Persistent FastAPI endpoint for continuous use
+
+---
 
 ## Model on HuggingFace
 
