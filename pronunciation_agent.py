@@ -227,10 +227,13 @@ class PronunciationAgent:
     3. User memory management
     """
 
-    def __init__(self, model="gpt-4o", device=None, memory_dir=MEMORY_DIR):
+    def __init__(self, model="gpt-4o", device=None, memory_dir=MEMORY_DIR,
+                 api_key=None, base_url=None):
         self.llm_model = model
         self.device = device
         self.memory_dir = memory_dir
+        self._api_key = api_key
+        self._base_url = base_url
         self._assessor = None
         self._client = None
 
@@ -243,10 +246,30 @@ class PronunciationAgent:
     def _load_client(self):
         if self._client is not None:
             return
-        api_key = os.environ.get("OPENAI_API_KEY")
+        # Support multiple LLM providers via env vars
+        # Priority: explicit args > provider-specific env > OPENAI_API_KEY
+        api_key = self._api_key
+        base_url = self._base_url
+
         if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
-        self._client = OpenAI(api_key=api_key)
+            # Auto-detect provider from model name
+            if self.llm_model.startswith("qwen"):
+                api_key = os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("QWEN_API_KEY")
+                if not base_url:
+                    base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            else:
+                api_key = os.environ.get("OPENAI_API_KEY")
+
+        if not api_key:
+            raise ValueError(
+                "API key not found. Set OPENAI_API_KEY (for GPT) or "
+                "DASHSCOPE_API_KEY / QWEN_API_KEY (for Qwen)"
+            )
+
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = OpenAI(**client_kwargs)
 
     def _call_llm(self, user_message, system_prompt=SYSTEM_PROMPT):
         """Call GPT-4o for feedback generation."""
@@ -359,7 +382,9 @@ def create_app():
         description="Phoneme-level pronunciation assessment with AI-powered feedback",
         version="2.0",
     )
-    agent = PronunciationAgent()
+    # Auto-detect LLM provider from env
+    llm_model = os.environ.get("LLM_MODEL", "gpt-4o")
+    agent = PronunciationAgent(model=llm_model)
 
     @app.post("/assess")
     async def assess(
@@ -454,9 +479,14 @@ def main():
     parser.add_argument("--audio", type=str, help="Path to audio file")
     parser.add_argument("--text", type=str, help="Reference text")
     parser.add_argument("--user", type=str, default="default", help="User ID")
-    parser.add_argument("--model", type=str, default="gpt-4o", help="LLM model (default: gpt-4o)")
+    parser.add_argument("--model", type=str, default="gpt-4o",
+                        help="LLM model (default: gpt-4o, e.g. qwen-plus, qwen-turbo)")
+    parser.add_argument("--api-key", type=str, default=None,
+                        help="API key (overrides env vars)")
+    parser.add_argument("--base-url", type=str, default=None,
+                        help="API base URL (auto-detected for qwen* models)")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
-    parser.add_argument("--device", type=str, default=None, help="Device (cuda:0, cpu)")
+    parser.add_argument("--device", type=str, default=None, help="Device (cuda:0, cpu, mps)")
     parser.add_argument("--serve", action="store_true", help="Start FastAPI server")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
     args = parser.parse_args()
@@ -470,7 +500,10 @@ def main():
     if not args.audio or not args.text:
         parser.error("--audio and --text are required (or use --serve)")
 
-    agent = PronunciationAgent(model=args.model, device=args.device)
+    agent = PronunciationAgent(
+        model=args.model, device=args.device,
+        api_key=args.api_key, base_url=args.base_url,
+    )
     result = agent.run(audio=args.audio, text=args.text, user_id=args.user)
 
     if args.json:
